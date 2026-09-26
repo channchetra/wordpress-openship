@@ -7,6 +7,9 @@
 # Services: wordpress -> db:3306. `db` is internal-only by design; only the
 # WordPress port is published on the host.
 #
+# No `build:` and no bind mounts, on purpose: this file has to run on platforms
+# that only pull pre-built images and reject relative mount sources.
+#
 # wp-cli lives in the WordPress container, so no extra service is needed:
 #   docker compose exec -u www-data wordpress wp plugin list
 
@@ -28,7 +31,7 @@ x-wordpress-env: &wordpress-env
   # sha1sum of /dev/urandom on first boot. Listing them as empty strings would
   # DEFEAT that, so only add them if you must pin specific values.
   # eval()'d by the image at the end of wp-config.php — before wp-settings.php
-  # runs, so the URL constants land in time to take effect. The image itself has
+  # runs, so the values below land in time to take effect. The image itself has
   # no WORDPRESS_HOME/WORDPRESS_SITEURL support, hence this block.
   # Escape every literal `$` as `$$`: compose interpolates this value.
   WORDPRESS_CONFIG_EXTRA: |
@@ -37,6 +40,14 @@ x-wordpress-env: &wordpress-env
     define('WP_POST_REVISIONS', 20);
     define('DISALLOW_FILE_EDIT', true);
     define('AUTOMATIC_UPDATER_DISABLED', false);
+    // PHP ships memory_limit=128M and max_execution_time=30 (php.ini-production,
+    // and the php image installs no php.ini at all), which is tight for media
+    // work and plugin installs. These two are PHP_INI_ALL, so raising them here
+    // works. upload_max_filesize / post_max_size deliberately are NOT here:
+    // PHP reads them while parsing the request body, before this file executes,
+    // so ini_set() would silently do nothing. See README for those limits.
+    @ini_set('memory_limit', '256M');
+    @ini_set('max_execution_time', '300');
     $$wp_home = getenv('WP_HOME');
     $$wp_siteurl = getenv('WP_SITEURL');
     foreach (array('WP_HOME' => $$wp_home, 'WP_SITEURL' => $$wp_siteurl) as $$name => $$url) {
@@ -65,8 +76,6 @@ services:
     environment: *wordpress-env
     volumes:
       - wp_app:/var/www/html
-      # PHP upload/memory limits (read-only, applied on top of the image defaults).
-      - ./uploads.ini:/usr/local/etc/php/conf.d/zz-uploads.ini:ro
     healthcheck:
       # The login page is served whether or not WordPress is installed yet
       # (/wp-admin/install.php redirects to /wp-login.php), so this asserts the

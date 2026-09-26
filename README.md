@@ -13,6 +13,9 @@ docker compose up -d
 docker compose logs -f wordpress
 ```
 
+No build step: every image is pulled, and the stack declares no bind mounts, so it deploys
+as-is on platforms that only run pre-built images.
+
 Then open <http://localhost:8080> and complete the WordPress installer
 (site title, admin user, password). Everything is stored in the two named volumes,
 so `docker compose down` is safe and `docker compose down -v` destroys the site.
@@ -24,7 +27,6 @@ Keys and salts are generated automatically on first boot — there is nothing to
 | --- | --- |
 | `compose.yaml` | `wordpress` + `db` services, healthchecks, volumes, log rotation |
 | `.env.example` | Every supported variable, with defaults filled in |
-| `uploads.ini` | PHP upload/memory limits, mounted read-only into the container |
 
 Volumes: `wp_app` → `/var/www/html` (core, themes, plugins, uploads), `wp_data` → `/var/lib/mysql`.
 
@@ -104,11 +106,27 @@ docker run --rm -v wordpress_wp_app:/data -v "$PWD":/backup alpine tar czf /back
     `wp option update home …` and `wp option update siteurl …`.
   - Never set a `localhost` placeholder while serving a real domain — WordPress would redirect
     visitors and assets there. Set the URL visitors actually use, or leave it empty.
+- **`memory_limit` and `max_execution_time` are raised at runtime** in the `WORDPRESS_CONFIG_EXTRA`
+  block (`@ini_set` to 256M / 300s), because both are `PHP_INI_ALL` and the stock image ships no
+  `php.ini`. `WP_MEMORY_LIMIT` is set alongside them. This covers media processing and plugin
+  installs; it does not affect upload sizes, which are parser-level — see the upload-limit note above.
 - **Editing `WORDPRESS_CONFIG_EXTRA`:** it is `eval()`'d as PHP, and compose interpolates the
   block, so escape every literal PHP `$` as `$$`. Never feed this block untrusted input.
-- **`uploads.ini`** raises `upload_max_filesize`/`post_max_size` to 64M and
-  `memory_limit` to 256M. Keep `post_max_size >= upload_max_filesize` or large uploads are
-  dropped before PHP sees them.
+- **Upload size limits are not configurable from this repo — here is exactly why.** The stack runs
+  the stock image, so PHP's compiled-in defaults apply: `upload_max_filesize = 2M`,
+  `post_max_size = 8M`, `max_file_uploads = 20` (the `php` image installs no `php.ini`, only the
+  `php.ini-*` templates). Those two directives are consumed by PHP while it parses the request body,
+  *before* any PHP code runs, so neither `ini_set()` in `WORDPRESS_CONFIG_EXTRA` nor
+  `WP_MEMORY_LIMIT` can raise them — only a real `php.ini` can. That means one of:
+  - a platform-level PHP/upload configuration, if your host exposes one;
+  - an **absolute-path** bind mount of an ini file,
+    e.g. `/srv/wordpress/uploads.ini:/usr/local/etc/php/conf.d/zz-uploads.ini:ro`. Relative
+    sources such as `./uploads.ini` are rejected by the Docker engine itself (it parses them as
+    named-volume names, which forbids `.` and `/`), so that form cannot work on any platform;
+  - a custom image that copies the ini in (`FROM wordpress:7.1-php8.3-apache` +
+    `COPY uploads.ini $PHP_INI_DIR/conf.d/`), for hosts that build images.
+  `memory_limit` (128M) and `max_execution_time` (30) *can* be raised at runtime, and the
+  `WORDPRESS_CONFIG_EXTRA` block already does so — see the note on that block below.
 - **`DISALLOW_FILE_EDIT`** is on (no plugin/theme code editor in wp-admin). Set it to `false`
   in the `WORDPRESS_CONFIG_EXTRA` block if you want the editor back.
 - **Database access** is intentionally not published to the host; use
