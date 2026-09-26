@@ -23,14 +23,10 @@ x-wordpress-env: &wordpress-env
   # WP_HOME / WP_SITEURL are actually defined.
   WP_HOME: ${WP_HOME:-}
   WP_SITEURL: ${WP_SITEURL:-}
-  WORDPRESS_AUTH_KEY: ${WORDPRESS_AUTH_KEY:-}
-  WORDPRESS_SECURE_AUTH_KEY: ${WORDPRESS_SECURE_AUTH_KEY:-}
-  WORDPRESS_LOGGED_IN_KEY: ${WORDPRESS_LOGGED_IN_KEY:-}
-  WORDPRESS_NONCE_KEY: ${WORDPRESS_NONCE_KEY:-}
-  WORDPRESS_AUTH_SALT: ${WORDPRESS_AUTH_SALT:-}
-  WORDPRESS_SECURE_AUTH_SALT: ${WORDPRESS_SECURE_AUTH_SALT:-}
-  WORDPRESS_LOGGED_IN_SALT: ${WORDPRESS_LOGGED_IN_SALT:-}
-  WORDPRESS_NONCE_SALT: ${WORDPRESS_NONCE_SALT:-}
+  # No WORDPRESS_*_KEY/SALT entries on purpose: the image's entrypoint replaces
+  # every "put your unique phrase here" placeholder in wp-config.php with a fresh
+  # sha1sum of /dev/urandom on first boot. Listing them as empty strings would
+  # DEFEAT that, so only add them if you must pin specific values.
   # eval()'d by the image at the end of wp-config.php — before wp-settings.php
   # runs, so the URL constants land in time to take effect. The image itself has
   # no WORDPRESS_HOME/WORDPRESS_SITEURL support, hence this block.

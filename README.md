@@ -8,7 +8,7 @@ no platform-side template — just `docker compose`.
 
 ```sh
 cp .env.example .env
-# edit .env: at minimum set DB_PASSWORD, WP_HOME, WP_SITEURL
+# edit .env: set DB_PASSWORD (required); optionally set WP_HOME / WP_SITEURL
 docker compose up -d
 docker compose logs -f wordpress
 ```
@@ -16,6 +16,7 @@ docker compose logs -f wordpress
 Then open <http://localhost:8080> and complete the WordPress installer
 (site title, admin user, password). Everything is stored in the two named volumes,
 so `docker compose down` is safe and `docker compose down -v` destroys the site.
+Keys and salts are generated automatically on first boot — there is nothing to paste.
 
 ## What's in the box
 
@@ -40,20 +41,18 @@ Volumes: `wp_app` → `/var/www/html` (core, themes, plugins, uploads), `wp_data
 | `DB_ROOT_PASSWORD` | empty | Empty = strong random password generated on first boot |
 | `WORDPRESS_PORT` | `8080` | Host port mapped to the container's port 80 |
 | `WORDPRESS_BIND_ADDR` | `0.0.0.0` | Use `127.0.0.1` to keep it loopback-only |
-| `WP_HOME`, `WP_SITEURL` | empty | Public site URL, including scheme |
+| `WP_HOME`, `WP_SITEURL` | empty | Optional; pin the public site URL (see below) |
 | `WORDPRESS_DEBUG` | `0` | `1` enables `WP_DEBUG` |
-| `WORDPRESS_*_KEY` / `*_SALT` | sample values | Eight values; replace all with your own |
 | `WORDPRESS_IMAGE` | `wordpress:7.1-php8.3-apache` | Pin/override the WordPress image |
 | `DB_IMAGE` | `mysql:8.4` | Pin/override the MySQL image |
 
-Generate a password and a fresh salt set:
+Generate a password:
 
 ```sh
 openssl rand -base64 36
-curl -s https://api.wordpress.org/secret-key/1.1/salt/
 ```
 
-Changing the salts logs every user out — that is the intended effect.
+Keys and salts are **not** in this list on purpose — see below.
 
 ## Adding a domain and TLS
 
@@ -87,11 +86,24 @@ docker run --rm -v wordpress_wp_app:/data -v "$PWD":/backup alpine tar czf /back
 
 ## Configuration notes
 
-- **`WP_HOME`/`WP_SITEURL` are defined through `WORDPRESS_CONFIG_EXTRA`, not a `WORDPRESS_*`
-  variable.** The official image has no environment variable for the site URL; the snippet in
-  `compose.yaml` reads them and defines the constants, logging a warning to the container log
-  if a value is missing or not an `http(s)` URL. When they are empty WordPress falls back to the
-  `siteurl` row in the database, which is the value written during installation.
+- **Keys and salts need no configuration.** On first boot the entrypoint writes `wp-config.php`
+  and substitutes each `put your unique phrase here` placeholder with a unique random value
+  (`sha1sum` of 1 MB from `/dev/urandom`), so all eight keys/salts are unique per site and live in
+  `wp-config.php` inside the `wp_app` volume. Do not add `WORDPRESS_AUTH_KEY` & friends as *empty*
+  strings — the entrypoint then writes empty constants, and WordPress falls back to generating its
+  own salts into the `wp_options` table. To pin your own set (e.g. to survive `down -v`), add them
+  with real 64+ character values; changing them later logs every user out, which is intended.
+- **`WP_HOME`/`WP_SITEURL` are optional, and are defined through `WORDPRESS_CONFIG_EXTRA`, not a
+  `WORDPRESS_*` variable.** The image has no environment variable for the site URL. WordPress
+  resolves its own URLs from the `home`/`siteurl` rows in `wp_options`; these constants override
+  those rows.
+  - *Set them* when the public URL is known: every emitted URL is pinned, so a later domain or host
+    change is one `.env` edit with no database surgery.
+  - *Leave them empty* to let the database drive everything. The installer seeds `home` and
+    `siteurl` from the URL it was reached at, so a later domain change means
+    `wp option update home …` and `wp option update siteurl …`.
+  - Never set a `localhost` placeholder while serving a real domain — WordPress would redirect
+    visitors and assets there. Set the URL visitors actually use, or leave it empty.
 - **Editing `WORDPRESS_CONFIG_EXTRA`:** it is `eval()`'d as PHP, and compose interpolates the
   block, so escape every literal PHP `$` as `$$`. Never feed this block untrusted input.
 - **`uploads.ini`** raises `upload_max_filesize`/`post_max_size` to 64M and
