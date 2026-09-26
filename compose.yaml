@@ -1,39 +1,125 @@
+# WordPress + MySQL — standalone Docker Compose stack.
+#
+#   cp .env.example .env     # then set DB_PASSWORD, WP_HOME and WP_SITEURL
+#   docker compose up -d
+#   docker compose logs -f wordpress
+#
+# Services: wordpress -> db:3306. `db` is internal-only by design; only the
+# WordPress port is published on the host.
+#
+# wp-cli lives in the WordPress container, so no extra service is needed:
+#   docker compose exec -u www-data wordpress wp plugin list
+
+name: wordpress
+
+x-wordpress-env: &wordpress-env
+  WORDPRESS_DB_HOST: db:3306
+  WORDPRESS_DB_NAME: ${DB_NAME:-wordpress}
+  WORDPRESS_DB_USER: ${DB_USER:-wordpress}
+  WORDPRESS_DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see .env.example}
+  WORDPRESS_TABLE_PREFIX: ${DB_TABLE_PREFIX:-wp_}
+  WORDPRESS_DEBUG: ${WORDPRESS_DEBUG:-0}
+  # Consumed by the WORDPRESS_CONFIG_EXTRA snippet below, which is where
+  # WP_HOME / WP_SITEURL are actually defined.
+  WP_HOME: ${WP_HOME:-}
+  WP_SITEURL: ${WP_SITEURL:-}
+  WORDPRESS_AUTH_KEY: ${WORDPRESS_AUTH_KEY:-}
+  WORDPRESS_SECURE_AUTH_KEY: ${WORDPRESS_SECURE_AUTH_KEY:-}
+  WORDPRESS_LOGGED_IN_KEY: ${WORDPRESS_LOGGED_IN_KEY:-}
+  WORDPRESS_NONCE_KEY: ${WORDPRESS_NONCE_KEY:-}
+  WORDPRESS_AUTH_SALT: ${WORDPRESS_AUTH_SALT:-}
+  WORDPRESS_SECURE_AUTH_SALT: ${WORDPRESS_SECURE_AUTH_SALT:-}
+  WORDPRESS_LOGGED_IN_SALT: ${WORDPRESS_LOGGED_IN_SALT:-}
+  WORDPRESS_NONCE_SALT: ${WORDPRESS_NONCE_SALT:-}
+  # eval()'d by the image at the end of wp-config.php — before wp-settings.php
+  # runs, so the URL constants land in time to take effect. The image itself has
+  # no WORDPRESS_HOME/WORDPRESS_SITEURL support, hence this block.
+  # Escape every literal `$` as `$$`: compose interpolates this value.
+  WORDPRESS_CONFIG_EXTRA: |
+    define('WP_MEMORY_LIMIT', '256M');
+    define('WP_MAX_MEMORY_LIMIT', '512M');
+    define('WP_POST_REVISIONS', 20);
+    define('DISALLOW_FILE_EDIT', true);
+    define('AUTOMATIC_UPDATER_DISABLED', false);
+    $$wp_home = getenv('WP_HOME');
+    $$wp_siteurl = getenv('WP_SITEURL');
+    foreach (array('WP_HOME' => $$wp_home, 'WP_SITEURL' => $$wp_siteurl) as $$name => $$url) {
+      if (!$$url) {
+        error_log(sprintf('[openship] %s is not set; falling back to the database siteurl. Set it in .env.', $$name));
+      } elseif (!preg_match('#^https?://#', $$url) || strpos($$url, "'") !== false) {
+        error_log(sprintf('[openship] %s=%s is not a usable http(s) URL.', $$name, $$url));
+      }
+    }
+    if ($$wp_home) {
+      define('WP_HOME', $$wp_home);
+    }
+    if ($$wp_siteurl) {
+      define('WP_SITEURL', $$wp_siteurl);
+    }
+
 services:
   wordpress:
-    image: wordpress:latest
+    image: ${WORDPRESS_IMAGE:-wordpress:7.1-php8.3-apache}
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${WORDPRESS_BIND_ADDR:-0.0.0.0}:${WORDPRESS_PORT:-8080}:80"
+    environment: *wordpress-env
     volumes:
       - wp_app:/var/www/html
-      - ../files/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
-    environment:
-      WORDPRESS_DB_HOST: wp_db:3306
-      WORDPRESS_DB_NAME: ${DB_NAME}
-      WORDPRESS_DB_USER: ${DB_USER:-wordpress}
-      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
-      WORDPRESS_DEBUG: ${WORDPRESS_DEBUG:-}
-      WORDPRESS_CONFIG_EXTRA: |
-        define('WP_MEMORY_LIMIT', '256M');
-        define('DISALLOW_FILE_EDIT', true);
-    depends_on:
-      wp_db:
-        condition: service_healthy
+      # PHP upload/memory limits (read-only, applied on top of the image defaults).
+      - ./uploads.ini:/usr/local/etc/php/conf.d/zz-uploads.ini:ro
+    healthcheck:
+      # The login page is served whether or not WordPress is installed yet
+      # (/wp-admin/install.php redirects to /wp-login.php), so this asserts the
+      # web server and PHP are actually up and serving WordPress.
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -T 5 -O /dev/null http://127.0.0.1/wp-login.php && grep -qi wordpress /var/www/html/wp-includes/version.php",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  wp_db:
-    image: mysql:8.4
+  db:
+    image: ${DB_IMAGE:-mysql:8.4}
     restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-wordpress}
+      MYSQL_USER: ${DB_USER:-wordpress}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see .env.example}
+      # Set DB_ROOT_PASSWORD in .env to pin the root password. Leave it empty
+      # and the image generates a strong random one on first boot, printed once
+      # to `docker compose logs db`; it must never reuse DB_PASSWORD.
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-}
+      # Read by the healthcheck's mysqladmin client (not by mysqld itself), so
+      # the password never shows up in the container's process list.
+      MYSQL_PWD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see .env.example}
     volumes:
       - wp_data:/var/lib/mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
-      MYSQL_DATABASE: ${DB_NAME}
-      MYSQL_USER: ${DB_USER:-wordpress}
-      MYSQL_PASSWORD: ${DB_PASSWORD}
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u \"$$MYSQL_USER\" --silent"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 12
       start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   wp_app:
